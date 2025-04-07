@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import os
 import json
 import io
+import mimetypes
+from pathlib import Path
 from google.auth import credentials
 from googleapiclient.http import (
     MediaInMemoryUpload,
@@ -34,6 +36,7 @@ class DriveFile(object):
     drive: Dict[str, Any]
     path: str
     img: bytes
+    mimetype: str | None
     scanned_results: Dict[str, Any]
 
     @property
@@ -49,7 +52,7 @@ class DriveFile(object):
         return self.scanned_results.get("name")
 
 
-def img_data_from_pdf(path) -> bytes:
+def img_data_from_pdf(path: Path) -> bytes:
     reader = PdfReader(path)
     page = reader.pages[0]
     if len(page.images) == 0:
@@ -58,7 +61,12 @@ def img_data_from_pdf(path) -> bytes:
     return page.images[0].data
 
 
-def ai_scan(client: OpenAI, data: bytes) -> Dict[str, Any]:
+def load_img(path: Path) -> bytes:
+    with open(path, "rb") as fd:
+        return fd.read()
+
+
+def ai_scan(client: OpenAI, mimetype, data: bytes) -> Dict[str, Any]:
     prompt = """You are an expert at extracting structured data from OCR scanning images. You will be given an image
     from which you should create name that follows the following format: `{merchantnameformat:lowercase-hypen-as-spaces}_{dateformat:2005-04-03}_{123.50ZAR}`.
 
@@ -77,6 +85,8 @@ def ai_scan(client: OpenAI, data: bytes) -> Dict[str, Any]:
     1 USD / 18.50 ZAR
     1 GBP / 22.50 ZAR
 
+    Consider only charges for the closest to date month. Disregard mentions of previous balances.
+
     From the image you should fill in the data in the given structured format
 """
     encoded = base64.b64encode(data).decode("utf-8")
@@ -91,7 +101,7 @@ def ai_scan(client: OpenAI, data: bytes) -> Dict[str, Any]:
                     {"type": "input_text", "text": str(prompt)},
                     {
                         "type": "input_image",
-                        "image_url": f"data:image/jpeg;base64,{encoded}",
+                        "image_url": f"data:{mimetype};base64,{encoded}",
                     },
                 ],
             },
@@ -158,12 +168,15 @@ def upload_into(svc, folder: str, items: List[DriveFile]):
     for i in items:
         bd = io.BytesIO(i.img)
 
-        filename = f"{i.scanned_results['name']}.jpg"
+        ext = "image/jpeg"
+        if i.mimetype is not None:
+            ext = mimetypes.guess_extension(i.mimetype)
+        filename = f"{i.scanned_results['name']}{ext}"
         meta = {
             "name": filename,
             "parents": [slips["id"]],
         }
-        up_media = MediaIoBaseUpload(bd, mimetype="image/jpeg")
+        up_media = MediaIoBaseUpload(bd, mimetype=i.mimetype)
 
         try:
             file = (
@@ -200,7 +213,9 @@ def download_all(svc, creds, files: List[Dict[str, Any]]) -> List[DriveFile]:
             while done is False:
                 _, done = downloader.next_chunk()
 
-            downloaded.append(DriveFile(f, file.name, b"", {}))
+            downloaded.append(
+                DriveFile(f, file.name, b"", "application/octet-stream", {})
+            )
     return downloaded
 
 
@@ -230,14 +245,17 @@ def main():
         client = OpenAI(api_key=api_token)
         converted = []
         for d in downloaded:
-            if d.path.endswith(".pdf"):
-                print(f"Scanning {d.path}")
-                d.img = img_data_from_pdf(d.path)
-                result = ai_scan(client, d.img)
-                # Next steps:
-                # need to make Downloa
-                d.scanned_results = result
-                converted.append(d)
+            path = Path(d.path)
+            if path.suffix.lower() == ".pdf":
+                d.img = img_data_from_pdf(path)
+                d.mimetype = "image/jpeg"
+            elif path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                d.mimetype, _ = mimetypes.guess_type(path)
+                d.img = load_img(path)
+            print(f"Scanning {d.path} ({d.mimetype})")
+            result = ai_scan(client, d.mimetype, d.img)
+            d.scanned_results = result
+            converted.append(d)
 
         upload_into(service, "Slips", converted)
         delete(service, [v.id for v in converted])
