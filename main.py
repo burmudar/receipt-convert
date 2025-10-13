@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import os
 import json
 import io
+import sys
 import mimetypes
 from pathlib import Path
 from google.auth import credentials
@@ -85,7 +86,7 @@ def ai_scan(client: OpenAI, mimetype, data: bytes) -> Dict[str, Any]:
     1 USD / 18.50 ZAR
     1 GBP / 22.50 ZAR
 
-    Consider only charges for the closest to date month. Disregard mentions of previous balances.
+    IMPORTANT: For statements that contain amounts for multiple transactions, only consider transactions for the closest to date month. Disregard mentions of previous balances.
 
     From the image you should fill in the data in the given structured format
 """
@@ -164,18 +165,26 @@ def list_folder(svc, folder: Dict[str, Any]) -> List[Dict[str, Any]]:
 def upload_into(svc, folder: str, items: List[DriveFile]):
     slips = get_folder(svc, folder)
 
+    if len(items) == 0:
+        print("No items to upload")
+        return
+
+
     print(f"Uploading into {folder} ({slips['id']})")
     for i in items:
+        print(f"Loading {i.path}")
         bd = io.BytesIO(i.img)
 
         ext = "image/jpeg"
         if i.mimetype is not None:
             ext = mimetypes.guess_extension(i.mimetype)
+
         filename = f"{i.scanned_results['name']}{ext}"
         meta = {
             "name": filename,
             "parents": [slips["id"]],
         }
+
         up_media = MediaIoBaseUpload(bd, mimetype=i.mimetype)
 
         try:
@@ -236,6 +245,11 @@ def main():
         service = build("drive", "v3", credentials=creds)
         inbox = get_folder(service, "Inbox")
         files = list_folder(service, inbox)
+
+        if len(files) == 0:
+            print(f"No files in {inbox['name']}. Exiting")
+            sys.exit(0)
+
         downloaded = download_all(service, credentials, files)
         for d in downloaded:
             print(f"Downloaded: {d}")
